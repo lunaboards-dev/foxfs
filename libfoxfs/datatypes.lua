@@ -26,7 +26,8 @@ dt.flags = {
 	"noatime",
 	"journal",
 	"nosubdir",
-	"ads"
+	"ads",
+	"nocow"
 }
 
 dt.superblock_base = {
@@ -93,6 +94,7 @@ dt.structs.superblock = {
 
 dt.structs.blockgroup = {
 	--{bitmap="block"},
+	{inode_block_count="locsize"},
 	{first_inode="block"},
 	{last_inode="block"},
 	{first_block="block"},
@@ -101,6 +103,7 @@ dt.structs.blockgroup = {
 	{free_inodes="inode"},
 	{next_group="block"},
 	{prev_group="block"},
+	{cow_reserved="block"},
 	{group_flags="flags"},
 	{group_sizes="c8"}
 }
@@ -204,7 +207,7 @@ local function serder(struct, sizes)
 	end
 	return setmetatable({
 		fields = fields,
-	}, {__call = function(_, input)
+	}, {__call = function(_, input, offset)
 		if type(input) == "table" then
 			local values = {}
 			for i=1, #fields do
@@ -220,6 +223,7 @@ local function serder(struct, sizes)
 			for i=1, #fields do
 				out[fields[i]] = values[i]
 			end
+			return out, values[values.n]
 		end
 	end, __len=function(t)
 		return packstr:packsize()

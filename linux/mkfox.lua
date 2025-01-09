@@ -65,8 +65,8 @@ local superblock = blkpad(types.superblock {
 	reserved_blocks = 0,
 	reserved_block_uid = 0,
 	reserved_block_gid = 0,
-	root = 1,
-	journal = 0,
+	root = 2,
+	journal = 1,
 
 	prealloc_blocks = 0,
 	inode_reserved = 1,
@@ -107,5 +107,23 @@ for i=1, settings.groups do
 	start_sec = next_start
 end
 print("\n")
+
+local fs = fox.open(media)
+fs:makenode {
+	mode = 0,
+	uid = 0,
+	gid = 0,
+	flags = fox.flags.inode_journal | fox.flags.inode_nocow,
+	nlinks = 1,
+	prealloc = 10
+}
+fs:makenode {
+	mode = 0x4307,
+	uid = 0,
+	gid = 0,
+	flags = 0,
+	nlinks = 2,
+	prealloc = 1
+}
 media.close()
 print("Write complete.")
