@@ -66,6 +66,7 @@ dt.structs.superblock = {
 	{free_blocks="block"},
 	{blocks_per_group="block"},
 	{first_group="block"},
+	{group_count="block"},
 
 	-- Boot block
 	{boot_block="block"},
@@ -94,6 +95,8 @@ dt.structs.superblock = {
 
 dt.structs.blockgroup = {
 	--{bitmap="block"},
+	--{magic="c5"},
+	{[true]="foxBG\0"},
 	{inode_block_count="locsize"},
 	{first_inode="block"},
 	{last_inode="block"},
@@ -117,9 +120,11 @@ dt.structs.journal_entry = {
 }
 
 dt.structs.inodegroup = {
+	{[true]="foxIG\0"},
 	{group="block"},
 	{prev="block"},
 	{next="block"},
+	{first_node="inode"},
 	{free="u8"}
 }
 
@@ -176,10 +181,17 @@ local function serder(struct, sizes)
 	local packstr = ""
 	local fields = {}
 	local strings = {}
+	local static = {}
 	for i=1, #struct do
 		local k, v = next(struct[i])
 		local vtype = v:sub(1,1)
 		local vsize = v:sub(2)
+		if k == true then
+			table.insert(fields, "static"..i)
+			static[#fields] = v
+			packstr = packstr .. "c"..#v
+			goto continue
+		end
 		if vtype ~= "x" then
 			table.insert(fields, k)
 		else
@@ -213,16 +225,21 @@ local function serder(struct, sizes)
 			for i=1, #fields do
 				local k = fields[i]
 				local v = input[k] or (strings[k] and "") or 0
+				if static[i] then
+					v = static[i]
+				end
 				--print(i, k, v)
 				table.insert(values, v)
 			end
 			return packstr:pack(table.unpack(values))
 		elseif type(input) == "string" then
-			local values = table.pack(packstr:unpack(input))
+			local values = table.pack(packstr:unpack(input, offset))
 			local out = {}
 			for i=1, #fields do
 				out[fields[i]] = values[i]
+				--print(fields[i], out[fields[i]])
 			end
+			--print(values[#values], values[values.n])
 			return out, values[values.n]
 		end
 	end, __len=function(t)
@@ -253,11 +270,11 @@ function types.structures(sizes)
 	else
 		sz = sizes
 	end
-	_t.sizes = setmetatable({}, {__index=sz,__call=function (t, type, val)
+	_t.sizes = setmetatable({}, {__index=sz,__call=function (t, _type, val)
 		if type(val) == "string" then
-			return string.unpack("I"..sz[type], val)
+			return string.unpack("I"..sz[_type], val)
 		else
-			return string.pack("I"..sz[type], val)
+			return string.pack("I"..sz[_type], val)
 		end
 	end})
 	for k, v in pairs(dt.structs) do

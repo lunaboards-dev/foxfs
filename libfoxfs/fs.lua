@@ -146,7 +146,8 @@ function fox.optimal_settings(dev, blksize, max_uid, max_gid)
 	})
 	local inode_header_size = #dt.serder(dt.dt.structs.inodegroup, {
 		block = blk_size,
-		locsize = loc_size
+		locsize = loc_size,
+		inode = inode_size
 	})
 	local inodes_per_blk = (blksize-inode_header_size)//inode_l
 	local inode_blks_per_group = math.max(inodes_per_group/inodes_per_blk)
@@ -182,7 +183,7 @@ end
 function fs:save_group(blk)
 	local grp = self.group_cache[blk]
 	if not grp then return end
-	self.dev.write(self.types.blockgroup(grp)..grp.bitmap)
+	self.dev.write(blk, self.types.blockgroup(grp)..grp.bitmap)
 	grp.dirty = nil
 end
 
@@ -203,7 +204,8 @@ function fs:first_free_blk(group)
 	for i=0, #bitmap-1 do
 		local b = bitmap:byte(i+1)
 		for j=0, 7 do
-			if b & (1 << j) == 0 then
+			--print(i*8+j, (b >> j) & 1)
+			if (b >> j) & 1 == 0 then
 				return i*8+j
 			end
 		end
@@ -212,7 +214,7 @@ end
 
 function fs:nearest_free_blk(group)
 	local blk = self:first_free_blk(group)
-	if blk then return blk end
+	if blk then return group, blk end
 	local left = self:load_group(group)
 	local right = left.next
 	left = left.prev
@@ -220,7 +222,7 @@ function fs:nearest_free_blk(group)
 		if left ~= 0 then
 			blk = self:first_free_blk(left)
 			if blk then
-				return blk
+				return left, blk
 			else
 				left = self:load_group(left).prev
 			end
@@ -228,7 +230,7 @@ function fs:nearest_free_blk(group)
 		if right ~= 0 then
 			blk = self:first_free_blk(right)
 			if blk then
-				return blk
+				return right, blk
 			else
 				right = self:load_group(right).next
 			end
@@ -238,21 +240,23 @@ end
 
 local function check_blk(bitmap, blk)
 	local i, j = blk//8, blk % 8
-	return (bitmap:byte(i)  >> i) & 1 > 0
+	--print(blk, (bitmap:byte(i+1) >> j) & 1 )
+	return (bitmap:byte(i+1) >> j) & 1 > 0
 end
 
 local function set_bitmap(bitmap, blk, val)
 	local i, j = blk//8, blk % 8
+	i = i + 1
 	local left = bitmap:sub(1, i-1)
 	local right = bitmap:sub(i+1)
 	local b = bitmap:byte(i)
-	local mask = ~bitmap ~ (1 << j)
+	local mask = ~b ~ (1 << j)
 	return left .. string.char((b & mask) | val << j) .. right
 end
 
 function fs:allocate_blk(group, blk)
 	local grpi = self:load_group(group)
-	if grpi.free_blocks == 0 then return end
+	if grpi.free_blocks == 0 or grpi.inode_block_count >= (self.super.inodes_per_group/self.super.inodes_per_blk) then return end
 	local bitmap = grpi.bitmap
 	if check_blk(bitmap, blk) then
 		error("attempt to allocate already allocated block")
@@ -289,16 +293,17 @@ end
 
 function fs:inode_to_group(inode)
 	local group_n = (inode//self.super.inodes_per_group)
+	local grp_blk = self:group_location(group_n+1)
 	local local_inode = inode % self.super.inodes_per_group
 	local block = local_inode//self.super.inodes_per_blk
 	local num = local_inode & self.super.inodes_per_blk
-	return group_n, block, num
+	return grp_blk, block, num
 end
 
 function fs:sync_inode_blk(blk, data)
 	local meta = self.types.inodegroup(data)
 	for i=1, self.super.inodes_per_blk do
-		meta = meta .. self.super.inode(data.inodes[i])
+		meta = meta .. self.types.inode(data.inodes[i])
 	end
 	self.dev.write(blk, meta)
 end
@@ -306,9 +311,12 @@ end
 function fs:read_inode_blk(blk)
 	local iblk = self.dev.read(blk)
 	local igrp, nextb = self.types.inodegroup(iblk)
+	--local nextb = #self.types.inodegroup+1
 	local inds = iblk:sub(#self.types.inodegroup+1)
 	local inodes = {}
 	for i=1, self.super.inodes_per_blk do
+		--print(nextb)
+		--print(self.types.inode(iblk, nextb))
 		inodes[i], nextb = self.types.inode(iblk, nextb)
 	end
 	igrp.inodes = inodes
@@ -317,18 +325,18 @@ end
 
 function fs:first_free_node(group)
 	local function first_free_in_blk(blk)
-		local iblk = self:read_inode(blk)
+		local iblk = self:read_inode_blk(blk)
 		if iblk.free == 0 then
 			return
 		end
 		for i=1, #iblk.inodes do
 			if iblk.inodes[i].flags & fox.flags.inode_allocated == 0 then
-				return i-1
+				return iblk.first_node+i-1, i-1
 			end
 		end
 	end
 	local grpi = self:load_group(group)
-	if grpi.free_inodes == 0 or grpi.flags & fox.flags.group_noalloc > 0 then return end
+	if grpi.free_inodes == 0 or grpi.group_flags & fox.flags.group_noalloc > 0 then return end
 	if grpi.first_inode == grpi.last_inode then
 		local free = first_free_in_blk(grpi.first_inode)
 		if not free then return self.super.inodes_per_blk end
@@ -338,20 +346,22 @@ function fs:first_free_node(group)
 		while left < right do
 			local ind = first_free_in_blk(left)
 			if ind then return ind end
-			left = self:read_inode(right).next
+			left = self:read_inode_blk(right).next
 			ind = first_free_in_blk(right)
 			if ind then return ind end
-			right = self:read_inode(right).prev
+			right = self:read_inode_blk(right).prev
 		end
 	end
 end
 
 function fs:get_inode_blk(group, blk)
+	--print("blk", blk)
 	local grpi = self:load_group(group)
 	local half = grpi.inode_block_count//2
+	if blk == 0 then return grpi.first_inode end
 	if blk <= half then
 		local cur = grpi.first_inode
-		for i=1, blk-1 do
+		for i=1, blk do
 			cur = self:read_inode_blk(cur).next
 		end
 		return cur
@@ -390,16 +400,81 @@ end
 
 function fs:update_inode(node, data)
 	local group, blk, num = self:inode_to_group(node)
+	--print("info", group, blk, num)
 	local ind_data = self.types.inode(data)
 	self:journal_add(node, group, fox.journal.inode_update, ind_data)
 	local real_blk = self:get_inode_blk(group, blk)
 	local iblk = self:read_inode_blk(real_blk)
 	iblk.inodes[num] = data
+	print("real blk", real_blk)
 	self:sync_inode_blk(real_blk, iblk)
 end
 
+function fs:group_location(grp_id)
+	if grp_id == 1 then
+		return self.super.first_group
+	end
+	return (grp_id-1)*self.super.blocks_per_group
+end
+
 function fs:makenode(info)
-	
+	local grp, node
+	for i=1, self.super.group_count do
+		grp = self:group_location(i)
+		node = self:first_free_node(grp)
+		print(node, grp)
+		if node then
+			print(node, grp)
+			break
+		end
+	end
+	local inode = {
+		mode = info.mode or 0,
+		uid = info.uid or 0,
+		gid = info.gid or 0,
+		flags = (info.flags or 0) | fox.flags.inode_allocated,
+		nlinks = info.nlinks or 0,
+		size_last = info.size_last or 0,
+		blocks = info.blocks or 0,
+		atime = info.atime or os.time()*1000,
+		mtime = info.mtime or os.time()*1000,
+		ctime = info.ctime or os.time()*1000,
+		dtime = info.dtime or 0,
+		sip = 0,
+		dip = 0,
+		tip = 0,
+		ads = info.ads or 0,
+		group = grp,
+		0, 0, 0, 0, 0,
+		0, 0, 0, 0, 0
+	}
+	if info.prealloc then
+		for i=1, info.prealloc do
+			local bgrp, blk = self:nearest_free_blk(grp)
+			self:allocate_blk(bgrp, blk)
+			inode[i] = bgrp+blk
+		end
+	end
+	print("node", node)
+	self:update_inode(node, inode)
+	self:save_group(grp)
+	return node, inode
+end
+
+local hand = {}
+
+function fs:raw_open(node, mode)
+
+end
+
+local dir = {}
+
+function fs:opendir(path)
+
+end
+
+function fs:mkdir(path)
+
 end
 
 return fox

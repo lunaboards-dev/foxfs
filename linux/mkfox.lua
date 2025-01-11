@@ -5,7 +5,7 @@ local fox = require("libfoxfs.fs")
 print("mkfox v1.0")
 print("")
 local media = dev.wrap_file(arg[1], 512)
-local settings = assert(fox.optimal_settings(media, 1024, 0xFFFF, 0xFFFF))
+local settings = assert(fox.optimal_settings(media, 512, 0xFFFF, 0xFFFF))
 local types = dt.structures(settings.sizes)
 local size_str = dt.size_string(settings.sizes)
 
@@ -56,7 +56,8 @@ local superblock = blkpad(types.superblock {
 	total_blocks = settings.blocks,
 	free_blocks = settings.blocks-meta_blks,
 	blocks_per_group = settings.group_size,
-	first_group = 4,
+	first_group = 3,
+	group_count = settings.groups,
 
 	boot_block = 0,
 	boot_block_size = 0,
@@ -85,7 +86,7 @@ local prev_group = 0
 for i=1, settings.groups do
 	io.stdout:write(string.format("\rWriting group %d of %d (Block 0x%x)", i, settings.groups, start_sec))
 	local last_group = i == settings.group
-	local next_start = (settings.group_size*i+1)
+	local next_start = (settings.group_size*i)
 	media.write(start_sec, blkpad(types.blockgroup {
 		first_inode = start_sec+1,
 		last_inode = start_sec+1,
@@ -102,6 +103,7 @@ for i=1, settings.groups do
 		group = start_sec,
 		prev = 0,
 		next = 0,
+		first_node = ((i-1)*settings.group_inodes)+1,
 		free = settings.blk_inodes
 	}))
 	start_sec = next_start
@@ -117,13 +119,15 @@ fs:makenode {
 	nlinks = 1,
 	prealloc = 10
 }
+
 fs:makenode {
 	mode = 0x4307,
 	uid = 0,
 	gid = 0,
-	flags = 0,
+	flags = fox.flags.inode_allocated,
 	nlinks = 2,
 	prealloc = 1
 }
+
 media.close()
 print("Write complete.")
