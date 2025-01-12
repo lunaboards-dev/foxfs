@@ -1,6 +1,8 @@
 local dev = require("libfoxfs.dev")
 local dt = require("libfoxfs.datatypes")
 local fox = require("libfoxfs.fs")
+local parser = require("argparse")("mkfox", "Creates a FoxFS volume")
+local args = parser:parse()
 
 print("mkfox v1.0")
 print("")
